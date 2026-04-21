@@ -58,5 +58,8 @@ docker build -f Dockerfile.worker --build-arg WORKER_VARIANT=gpu -t uvr-worker:g
 The image includes startup and container health checks through `service.worker_healthcheck`:
 
 - verifies required model folders from `UVR_MODEL_PATHS`,
+- verifies model availability by checking required model files (`UVR_REQUIRED_MODEL_FILES`) or model artifact patterns (`UVR_MODEL_ARTIFACT_PATTERNS`),
 - verifies `ffmpeg` executable availability,
 - verifies ONNX Runtime providers and enforces `CUDAExecutionProvider` when `UVR_EXPECT_CUDA=1` is set (otherwise CPU fallback is accepted).
+
+Worker job-store path can be configured with `UVR_JOB_DB_PATH` (default: `data/separation_jobs.sqlite3`), which is suitable for volume mounting.

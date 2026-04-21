@@ -22,7 +22,12 @@ RUN if [ "$WORKER_VARIANT" = "gpu" ]; then \
         pip install -r requirements-worker-cpu.txt; \
     fi
 
-COPY . .
+COPY service/ ./service/
+COPY demucs/ ./demucs/
+COPY lib_v5/ ./lib_v5/
+COPY gui_data/ ./gui_data/
+COPY models/ ./models/
+COPY separate.py UVR.py __version__.py ./
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
     CMD python -m service.worker_healthcheck
