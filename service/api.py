@@ -123,6 +123,7 @@ class DurableJobStore:
                 (now,),
             ).fetchone()
             if row is None:
+                conn.commit()
                 return None
 
             updated = conn.execute(
@@ -135,11 +136,14 @@ class DurableJobStore:
                 (now, lease_until, row["id"], now),
             ).rowcount
             if updated == 0:
+                conn.commit()
                 return None
 
             claimed = conn.execute("SELECT * FROM jobs WHERE id = ?", (row["id"],)).fetchone()
             if claimed is None:
+                conn.commit()
                 return None
+            conn.commit()
 
         return self._deserialize_job(claimed)
 
@@ -215,7 +219,7 @@ class DurableJobStore:
         if isinstance(value, set):
             return {"__uvr_serialized_type__": "set", "items": [DurableJobStore._to_serializable(v) for v in value]}
         if callable(value):
-            return None
+            return {"__uvr_serialized_type__": "callable", "repr": repr(value)}
         if hasattr(value, "__dict__"):
             attrs = {k: DurableJobStore._to_serializable(v) for k, v in vars(value).items() if not callable(v)}
             return {"__uvr_serialized_type__": "object", "attrs": attrs}
@@ -234,6 +238,8 @@ class DurableJobStore:
             if kind == "object":
                 attrs = {k: DurableJobStore._from_serialized(v) for k, v in value.get("attrs", {}).items()}
                 return _AttributeObject(attrs)
+            if kind == "callable":
+                return None
             return {k: DurableJobStore._from_serialized(v) for k, v in value.items()}
         return value
 
@@ -327,7 +333,10 @@ class SeparationJobAPI:
         self.store = store or DurableJobStore()
         secret = (url_signing_secret or os.getenv("UVR_URL_SIGNING_SECRET", "")).strip()
         if not secret:
-            raise ValueError("url_signing_secret is required (or set UVR_URL_SIGNING_SECRET)")
+            raise ValueError(
+                "A non-empty url_signing_secret must be provided via constructor parameter "
+                "or UVR_URL_SIGNING_SECRET environment variable for security."
+            )
         self._url_signing_secret = secret
 
     def post_jobs(self, payload: SeparationJobRequest) -> dict[str, Any]:
@@ -357,7 +366,11 @@ class SeparationJobAPI:
         return {"id": job.id, "status": job.status, "artifacts": signed_artifacts, "expires_at": expires_at}
 
     def _sign_artifact_path(self, job_id: str, artifact_path: str, expires_at: int) -> dict[str, str | int]:
-        artifact_id = hashlib.sha256(f"{job_id}:{artifact_path}".encode("utf-8")).hexdigest()
+        artifact_id = hmac.new(
+            self._url_signing_secret.encode("utf-8"),
+            f"{job_id}:{artifact_path}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
         payload = f"{job_id}:{artifact_id}:{artifact_path}:{expires_at}".encode("utf-8")
         signature = hmac.new(self._url_signing_secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
         query = urlencode({"job_id": job_id, "artifact_id": artifact_id, "expires": expires_at, "sig": signature})
