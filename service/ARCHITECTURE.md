@@ -7,7 +7,8 @@ This service now follows an async job architecture compatible with Vercel + exte
 - **Vercel API layer (`SeparationJobAPI`)**
   - `post_jobs(...)` stores a durable job record in SQLite (can be replaced with Postgres/SQS/Upstash).
   - `get_job(...)` is poll-friendly and returns status/progress/logs.
-  - `get_job_artifacts(...)` returns signed artifact URLs after completion.
+  - `get_job_artifacts(...)` returns signed artifact URLs with opaque artifact IDs after completion.
+  - Signing secret must be provided via constructor or `UVR_URL_SIGNING_SECRET`.
 
 - **Durable queue/store (`DurableJobStore`)**
   - Persists jobs in a `jobs` table.

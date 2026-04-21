@@ -3,12 +3,14 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import sqlite3
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import sleep, time
 from typing import Any, Callable
+from urllib.parse import urlencode
 from uuid import uuid4
 
 from separate import run_separation
@@ -42,11 +44,17 @@ class SeparationJob:
     updated_at: float = field(default_factory=time)
 
 
+class _AttributeObject:
+    def __init__(self, attrs: dict[str, Any]) -> None:
+        self.__dict__.update(attrs)
+
+
 class DurableJobStore:
     """SQLite-backed store that survives Vercel cold starts/retries."""
 
-    def __init__(self, db_path: str | Path = "separation_jobs.sqlite3") -> None:
+    def __init__(self, db_path: str | Path = "separation_jobs.sqlite3", lease_seconds: int = 120) -> None:
         self.db_path = str(db_path)
+        self.lease_seconds = lease_seconds
         self._lock = threading.Lock()
         self._init_db()
 
@@ -98,12 +106,16 @@ class DurableJobStore:
 
         return self._deserialize_job(row)
 
-    def claim_next(self, lease_seconds: int = 120) -> SeparationJob | None:
+    def claim_next(self, lease_seconds: int | None = None) -> SeparationJob | None:
         now = time()
+        lease_duration = self.lease_seconds if lease_seconds is None else lease_seconds
+        lease_until = now + lease_duration
         with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 """
-                SELECT * FROM jobs
+                SELECT id
+                FROM jobs
                 WHERE status = 'queued' OR (status = 'running' AND lease_until IS NOT NULL AND lease_until < ?)
                 ORDER BY created_at ASC
                 LIMIT 1
@@ -113,24 +125,31 @@ class DurableJobStore:
             if row is None:
                 return None
 
-            lease_until = now + lease_seconds
-            conn.execute(
-                "UPDATE jobs SET status = 'running', updated_at = ?, lease_until = ? WHERE id = ?",
-                (now, lease_until, row["id"]),
-            )
+            updated = conn.execute(
+                """
+                UPDATE jobs
+                SET status = 'running', updated_at = ?, lease_until = ?
+                WHERE id = ?
+                  AND (status = 'queued' OR (status = 'running' AND lease_until IS NOT NULL AND lease_until < ?))
+                """,
+                (now, lease_until, row["id"], now),
+            ).rowcount
+            if updated == 0:
+                return None
 
-        claimed = dict(row)
-        claimed["status"] = "running"
-        claimed["updated_at"] = now
-        claimed["lease_until"] = lease_until
+            claimed = conn.execute("SELECT * FROM jobs WHERE id = ?", (row["id"],)).fetchone()
+            if claimed is None:
+                return None
+
         return self._deserialize_job(claimed)
 
-    def heartbeat(self, job_id: str, progress: float, logs: list[str]) -> None:
+    def heartbeat(self, job_id: str, progress: float, logs: list[str], lease_seconds: int | None = None) -> None:
         now = time()
+        lease_duration = self.lease_seconds if lease_seconds is None else lease_seconds
         with self._lock, self._connect() as conn:
             conn.execute(
                 "UPDATE jobs SET progress = ?, logs_json = ?, updated_at = ?, lease_until = ? WHERE id = ?",
-                (max(0.0, min(1.0, progress)), json.dumps(logs), now, now + 120, job_id),
+                (max(0.0, min(1.0, progress)), json.dumps(logs), now, now + lease_duration, job_id),
             )
 
     def complete(self, job_id: str, artifacts: list[str]) -> None:
@@ -163,9 +182,9 @@ class DurableJobStore:
             "input_audio": payload.input_audio,
             "output_dir": payload.output_dir,
             "audio_file_base": payload.audio_file_base,
-            "model_data": payload.model_data,
-            "settings": payload.settings,
-            "list_all_models": payload.list_all_models,
+            "model_data": DurableJobStore._to_serializable(payload.model_data),
+            "settings": DurableJobStore._to_serializable(payload.settings),
+            "list_all_models": DurableJobStore._to_serializable(payload.list_all_models),
         }
         return json.dumps(storable)
 
@@ -176,10 +195,47 @@ class DurableJobStore:
             input_audio=data["input_audio"],
             output_dir=data["output_dir"],
             audio_file_base=data["audio_file_base"],
-            model_data=data["model_data"],
-            settings=data.get("settings", {}),
-            list_all_models=data.get("list_all_models", []),
+            model_data=DurableJobStore._from_serialized(data["model_data"]),
+            settings=DurableJobStore._from_serialized(data.get("settings", {})),
+            list_all_models=DurableJobStore._from_serialized(data.get("list_all_models", [])),
         )
+
+    @staticmethod
+    def _to_serializable(value: Any) -> Any:
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, dict):
+            return {str(k): DurableJobStore._to_serializable(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [DurableJobStore._to_serializable(v) for v in value]
+        if isinstance(value, tuple):
+            return {"__uvr_serialized_type__": "tuple", "items": [DurableJobStore._to_serializable(v) for v in value]}
+        if isinstance(value, set):
+            return {"__uvr_serialized_type__": "set", "items": [DurableJobStore._to_serializable(v) for v in value]}
+        if callable(value):
+            return None
+        if hasattr(value, "__dict__"):
+            attrs = {k: DurableJobStore._to_serializable(v) for k, v in vars(value).items() if not callable(v)}
+            return {"__uvr_serialized_type__": "object", "attrs": attrs}
+        return str(value)
+
+    @staticmethod
+    def _from_serialized(value: Any) -> Any:
+        if isinstance(value, list):
+            return [DurableJobStore._from_serialized(v) for v in value]
+        if isinstance(value, dict):
+            kind = value.get("__uvr_serialized_type__")
+            if kind == "tuple":
+                return tuple(DurableJobStore._from_serialized(v) for v in value.get("items", []))
+            if kind == "set":
+                return set(DurableJobStore._from_serialized(v) for v in value.get("items", []))
+            if kind == "object":
+                attrs = {k: DurableJobStore._from_serialized(v) for k, v in value.get("attrs", {}).items()}
+                return _AttributeObject(attrs)
+            return {k: DurableJobStore._from_serialized(v) for k, v in value.items()}
+        return value
 
     def _deserialize_job(self, row: sqlite3.Row | dict[str, Any]) -> SeparationJob:
         return SeparationJob(
@@ -233,14 +289,16 @@ class SeparationWorker:
     def _run_job(self, job: SeparationJob, logs: list[str]) -> None:
         request = job.request
         Path(request.output_dir).mkdir(parents=True, exist_ok=True)
+        latest_progress = job.progress
 
         def set_progress_bar(step: float, inference_iterations: int = 0):
-            progress = float(step + inference_iterations)
-            self.store.heartbeat(job.id, progress, logs)
+            nonlocal latest_progress
+            latest_progress = float(step + inference_iterations)
+            self.store.heartbeat(job.id, latest_progress, logs)
 
         def write_to_console(message: str):
             logs.append(message)
-            self.store.heartbeat(job.id, job.progress, logs)
+            self.store.heartbeat(job.id, latest_progress, logs)
 
         process_data = {
             "model_data": request.model_data,
@@ -265,9 +323,12 @@ class SeparationWorker:
 class SeparationJobAPI:
     """HTTP-style contract for Vercel API routes with external GPU workers."""
 
-    def __init__(self, store: DurableJobStore | None = None, url_signing_secret: str = "uvr-secret") -> None:
+    def __init__(self, store: DurableJobStore | None = None, url_signing_secret: str | None = None) -> None:
         self.store = store or DurableJobStore()
-        self._url_signing_secret = url_signing_secret
+        secret = (url_signing_secret or os.getenv("UVR_URL_SIGNING_SECRET", "")).strip()
+        if not secret:
+            raise ValueError("url_signing_secret is required (or set UVR_URL_SIGNING_SECRET)")
+        self._url_signing_secret = secret
 
     def post_jobs(self, payload: SeparationJobRequest) -> dict[str, Any]:
         """Vercel endpoint behavior: persist metadata and enqueue job."""
@@ -292,14 +353,17 @@ class SeparationJobAPI:
         job = self.store.get(job_id)
         now = int(time())
         expires_at = now + expires_in_seconds
-        signed_artifacts = [self._sign_artifact_path(path, expires_at) for path in job.artifacts]
+        signed_artifacts = [self._sign_artifact_path(job.id, path, expires_at) for path in job.artifacts]
         return {"id": job.id, "status": job.status, "artifacts": signed_artifacts, "expires_at": expires_at}
 
-    def _sign_artifact_path(self, artifact_path: str, expires_at: int) -> dict[str, str | int]:
-        payload = f"{artifact_path}:{expires_at}".encode("utf-8")
+    def _sign_artifact_path(self, job_id: str, artifact_path: str, expires_at: int) -> dict[str, str | int]:
+        artifact_id = hashlib.sha256(f"{job_id}:{artifact_path}".encode("utf-8")).hexdigest()
+        payload = f"{job_id}:{artifact_id}:{artifact_path}:{expires_at}".encode("utf-8")
         signature = hmac.new(self._url_signing_secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
+        query = urlencode({"job_id": job_id, "artifact_id": artifact_id, "expires": expires_at, "sig": signature})
         return {
-            "path": artifact_path,
-            "url": f"/artifacts?path={artifact_path}&expires={expires_at}&sig={signature}",
+            "id": artifact_id,
+            "name": Path(artifact_path).name,
+            "url": f"/artifacts?{query}",
             "expires_at": expires_at,
         }
