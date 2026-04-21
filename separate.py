@@ -1457,3 +1457,18 @@ def loading_mix(X, mp):
     del X_wave, X_spec_s
 
     return X_spec
+
+
+def run_separation(model_data, process_data: dict):
+    """Run a single separation job for the provided model and process payload."""
+    if model_data.process_method == VR_ARCH_TYPE:
+        seperator = SeperateVR(model_data, process_data)
+    elif model_data.process_method == MDX_ARCH_TYPE:
+        seperator = SeperateMDXC(model_data, process_data) if model_data.is_mdx_c else SeperateMDX(model_data, process_data)
+    elif model_data.process_method == DEMUCS_ARCH_TYPE:
+        seperator = SeperateDemucs(model_data, process_data)
+    else:
+        raise ValueError(f"Unsupported process method: {model_data.process_method}")
+
+    seperator.seperate()
+    return seperator
