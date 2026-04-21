@@ -124,7 +124,6 @@ class DurableJobStore:
                 (now,),
             ).fetchone()
             if row is None:
-                conn.commit()
                 return None
 
             updated = conn.execute(
@@ -137,14 +136,11 @@ class DurableJobStore:
                 (now, lease_until, row["id"], now),
             ).rowcount
             if updated == 0:
-                conn.commit()
                 return None
 
             claimed = conn.execute("SELECT * FROM jobs WHERE id = ?", (row["id"],)).fetchone()
             if claimed is None:
-                conn.commit()
                 return None
-            conn.commit()
 
         return self._deserialize_job(claimed)
 
@@ -153,8 +149,15 @@ class DurableJobStore:
         lease_duration = self.lease_seconds if lease_seconds is None else lease_seconds
         with self._lock, self._connect() as conn:
             conn.execute(
-                "UPDATE jobs SET progress = ?, logs_json = ?, updated_at = ?, lease_until = ? WHERE id = ?",
-                (max(0.0, min(1.0, progress)), json.dumps(logs), now, now + lease_duration, job_id),
+                """
+                UPDATE jobs
+                SET progress = ?, logs_json = ?, updated_at = ?, lease_until = ?
+                WHERE id = ?
+                  AND status = 'running'
+                  AND lease_until IS NOT NULL
+                  AND lease_until >= ?
+                """,
+                (max(0.0, min(1.0, progress)), json.dumps(logs), now, now + lease_duration, job_id, now),
             )
 
     def complete(self, job_id: str, artifacts: list[str]) -> None:
@@ -220,7 +223,7 @@ class DurableJobStore:
         if isinstance(value, set):
             return {DurableJobStore.SERIALIZED_TYPE_KEY: "set", "items": [DurableJobStore._to_serializable(v) for v in value]}
         if callable(value):
-            return {DurableJobStore.SERIALIZED_TYPE_KEY: "callable"}  # callables are not rehydrated for safety
+            raise TypeError("callable values are not serializable in durable job payloads")
         if hasattr(value, "__dict__"):
             attrs = {k: DurableJobStore._to_serializable(v) for k, v in vars(value).items() if not callable(v)}
             return {DurableJobStore.SERIALIZED_TYPE_KEY: "object", "attrs": attrs}
@@ -334,7 +337,10 @@ class SeparationJobAPI:
         self.store = store or DurableJobStore()
         secret = (url_signing_secret or os.getenv("UVR_URL_SIGNING_SECRET", "")).strip()
         if not secret:
-            raise ValueError("URL signing secret must be configured.")
+            raise ValueError(
+                "URL signing secret must be provided via constructor parameter "
+                "or UVR_URL_SIGNING_SECRET environment variable."
+            )
         self._url_signing_secret = secret
 
     def post_jobs(self, payload: SeparationJobRequest) -> dict[str, Any]:
