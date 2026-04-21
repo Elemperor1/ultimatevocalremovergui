@@ -1,3 +1,3 @@
-from service.api import SeparationJobAPI, SeparationJobRequest
+from service.api import DurableJobStore, SeparationJobAPI, SeparationJobRequest, SeparationWorker
 
-__all__ = ["SeparationJobAPI", "SeparationJobRequest"]
+__all__ = ["DurableJobStore", "SeparationJobAPI", "SeparationJobRequest", "SeparationWorker"]
