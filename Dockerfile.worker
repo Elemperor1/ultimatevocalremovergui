@@ -1,0 +1,35 @@
+# Dedicated worker image for asynchronous UVR separation jobs.
+FROM python:3.10.9-slim-bookworm
+
+ARG WORKER_VARIANT=cpu
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    UVR_MODEL_PATHS="models/VR_Models,models/MDX_Net_Models,models/Demucs_Models"
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    rubberband-cli \
+    libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements-worker-common.txt requirements-worker-cpu.txt requirements-worker-gpu.txt ./
+RUN if [ "$WORKER_VARIANT" = "gpu" ]; then \
+        pip install -r requirements-worker-gpu.txt; \
+    else \
+        pip install -r requirements-worker-cpu.txt; \
+    fi
+
+COPY service/ ./service/
+COPY demucs/ ./demucs/
+COPY lib_v5/ ./lib_v5/
+COPY gui_data/ ./gui_data/
+COPY models/ ./models/
+COPY separate.py UVR.py __version__.py ./
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+    CMD python -m service.worker_healthcheck
+
+CMD ["python", "-m", "service.worker_main"]

@@ -1,0 +1,3 @@
+-r requirements-worker-common.txt
+torch
+onnxruntime
