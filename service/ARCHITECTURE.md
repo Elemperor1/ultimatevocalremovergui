@@ -20,7 +20,7 @@ This service now follows an async job architecture compatible with Vercel + exte
   - Streams input referenced in metadata from storage (`inputs/{job_id}/...`).
   - Preloads common models on startup from `models/...` with checksum-aware cache reuse.
   - Runs source separation on temp local scratch storage.
-  - Uploads outputs immediately to `outputs/{job_id}/...` and stores artifact metadata/signed URLs.
+- Uploads outputs immediately to `outputs/{job_id}/...`, stores artifact metadata, and serves signed URLs from the API.
   - Applies retention cleanup for stale artifacts and cache invalidation by version/hash.
 
 ## Production swaps

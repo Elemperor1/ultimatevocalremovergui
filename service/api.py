@@ -78,12 +78,20 @@ class LocalObjectStorage:
     """Filesystem-backed storage that mirrors S3/R2/GCS key prefixes."""
 
     def __init__(self, root_dir: str | Path, url_ttl_seconds: int = 3600) -> None:
-        self.root_dir = Path(root_dir)
+        self.root_dir = Path(root_dir).resolve()
         self.root_dir.mkdir(parents=True, exist_ok=True)
         self.url_ttl_seconds = int(url_ttl_seconds)
 
     def path_for_key(self, key: str) -> Path:
-        return self.root_dir / key
+        key_path = Path(str(key))
+        if key_path.is_absolute() or ".." in key_path.parts:
+            raise ValueError(f"unsafe storage key: {key}")
+        resolved = (self.root_dir / key_path).resolve()
+        try:
+            resolved.relative_to(self.root_dir)
+        except ValueError as exc:
+            raise ValueError(f"unsafe storage key: {key}") from exc
+        return resolved
 
     def stream_download(self, key: str, destination: str | Path, chunk_size: int = 1024 * 1024) -> Path:
         src = self.path_for_key(key)
@@ -117,7 +125,9 @@ class LocalObjectStorage:
         ttl = self.url_ttl_seconds if expires_in_seconds is None else max(1, int(expires_in_seconds))
         expires_at = int(time()) + ttl
         # Local worker path is intentionally opaque but stable for API return payloads.
-        return f"file://{self.path_for_key(key)}?expires={expires_at}"
+        file_uri = self.path_for_key(key).resolve().as_uri()
+        query = urlencode({"expires": expires_at})
+        return f"{file_uri}?{query}"
 
     def remove_prefix_older_than(self, prefix: str, cutoff_epoch: float) -> int:
         prefix_path = self.path_for_key(prefix)
@@ -153,10 +163,12 @@ class ModelCacheManager:
 
         # cache invalidation by version/hash or removed specs.
         for key, entry in list(manifest.items()):
-            cache_path = self.cache_dir / entry.get("cache_name", "")
+            cache_name = entry.get("cache_name")
             if key not in expected_keys:
-                if cache_path.exists():
-                    cache_path.unlink(missing_ok=True)
+                if cache_name:
+                    cache_path = self.cache_dir / cache_name
+                    if cache_path.is_file():
+                        cache_path.unlink(missing_ok=True)
                 manifest.pop(key, None)
                 logs.append(f"model cache invalidated (removed from preload list): {key}")
 
@@ -441,7 +453,7 @@ class SeparationWorker:
             cache_dir=os.getenv("UVR_MODEL_CACHE_DIR", "data/model_cache"),
             specs=_parse_preload_model_specs(os.getenv("UVR_PRELOAD_MODELS", "[]")),
         )
-        self.output_retention_seconds = int(os.getenv("UVR_OUTPUT_RETENTION_SECONDS", str(7 * 24 * 3600)))
+        self.output_retention_seconds = _safe_int_env("UVR_OUTPUT_RETENTION_SECONDS", 7 * 24 * 3600)
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -533,9 +545,10 @@ class SeparationWorker:
         logs: list[str],
     ) -> Path:
         source = request.settings.get("input_storage_key") or request.input_audio
-        local_input = temp_root / Path(request.audio_file_base).with_suffix(".wav").name
-
         source_str = str(source)
+        source_suffix = Path(source_str).suffix or ".wav"
+        local_input = temp_root / Path(request.audio_file_base).with_suffix(source_suffix).name
+
         if source_str.startswith((f"{StorageLayout.INPUTS_PREFIX}/", f"{StorageLayout.MODELS_PREFIX}/")):
             self.storage.stream_download(source_str, local_input)
             logs.append(f"streamed input from storage key: {source_str}")
@@ -606,11 +619,17 @@ class SeparationJobAPI:
 
     def _to_artifact_response(self, job_id: str, artifact: Any, expires_at: int) -> dict[str, Any]:
         if isinstance(artifact, dict):
-            key = artifact.get("key", "")
-            artifact_id = self._artifact_id(job_id, key or artifact.get("name", "unknown"))
-            url = artifact.get("url") or self._sign_artifact_path(job_id, key, expires_at)["url"]
+            artifact_path = artifact.get("key") or artifact.get("path") or artifact.get("name") or "unknown"
+            signed = self._sign_artifact_path(job_id, artifact_path, expires_at)
             merged = dict(artifact)
-            merged.update({"id": artifact_id, "url": url, "expires_at": expires_at})
+            merged.update(
+                {
+                    "id": signed["id"],
+                    "name": artifact.get("name") or signed["name"],
+                    "url": signed["url"],
+                    "expires_at": expires_at,
+                }
+            )
             return merged
 
         artifact_path = str(artifact)
@@ -673,3 +692,13 @@ def _sha256_file(path: str | Path) -> str:
         for chunk in iter(lambda: fp.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _safe_int_env(name: str, default: int) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        return int(raw_value)
+    except ValueError:
+        return default
