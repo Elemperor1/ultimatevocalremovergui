@@ -220,10 +220,7 @@ class DurableJobStore:
         if isinstance(value, set):
             return {DurableJobStore.SERIALIZED_TYPE_KEY: "set", "items": [DurableJobStore._to_serializable(v) for v in value]}
         if callable(value):
-            return {
-                DurableJobStore.SERIALIZED_TYPE_KEY: "callable",
-                "repr": repr(value),  # callables are not rehydrated for safety; worker uses safe defaults for callbacks
-            }
+            return {DurableJobStore.SERIALIZED_TYPE_KEY: "callable"}  # callables are not rehydrated for safety
         if hasattr(value, "__dict__"):
             attrs = {k: DurableJobStore._to_serializable(v) for k, v in vars(value).items() if not callable(v)}
             return {DurableJobStore.SERIALIZED_TYPE_KEY: "object", "attrs": attrs}
@@ -337,10 +334,7 @@ class SeparationJobAPI:
         self.store = store or DurableJobStore()
         secret = (url_signing_secret or os.getenv("UVR_URL_SIGNING_SECRET", "")).strip()
         if not secret:
-            raise ValueError(
-                "A non-empty url_signing_secret must be provided via constructor parameter "
-                "or UVR_URL_SIGNING_SECRET environment variable for security."
-            )
+            raise ValueError("URL signing secret must be configured.")
         self._url_signing_secret = secret
 
     def post_jobs(self, payload: SeparationJobRequest) -> dict[str, Any]:
