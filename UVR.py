@@ -45,7 +45,7 @@ from kthread import KThread
 from lib_v5 import spec_utils
 from pathlib  import Path
 from separate import (
-    SeperateDemucs, SeperateMDX, SeperateMDXC, SeperateVR,  # Model-related
+    run_separation,  # Model orchestration
     save_format, clear_gpu_cache,  # Utility functions
     cuda_available, mps_available, #directml_available,
 )
@@ -6628,14 +6628,7 @@ class MainWindow(TkinterDnD.Tk if is_dnd_compatible else tk.Tk):
                                     'is_ensemble_master': is_ensemble,
                                     'is_4_stem_ensemble': True if self.ensemble_main_stem_var.get() in [FOUR_STEM_ENSEMBLE, MULTI_STEM_ENSEMBLE] and is_ensemble else False}
                     
-                    if current_model.process_method == VR_ARCH_TYPE:
-                        seperator = SeperateVR(current_model, process_data)
-                    if current_model.process_method == MDX_ARCH_TYPE:
-                        seperator = SeperateMDXC(current_model, process_data) if current_model.is_mdx_c else SeperateMDX(current_model, process_data)
-                    if current_model.process_method == DEMUCS_ARCH_TYPE:
-                        seperator = SeperateDemucs(current_model, process_data)
-                        
-                    seperator.seperate()
+                    run_separation(current_model, process_data)
                     
                     if is_ensemble:
                         self.command_Text.write('\n')
