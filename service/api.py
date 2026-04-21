@@ -44,13 +44,14 @@ class SeparationJob:
     updated_at: float = field(default_factory=time)
 
 
-class _AttributeObject:
+class _DeserializedObject:
     def __init__(self, attrs: dict[str, Any]) -> None:
         self.__dict__.update(attrs)
 
 
 class DurableJobStore:
     """SQLite-backed store that survives Vercel cold starts/retries."""
+    SERIALIZED_TYPE_KEY = "__uvr_serialized_type__"
 
     def __init__(self, db_path: str | Path = "separation_jobs.sqlite3", lease_seconds: int = 120) -> None:
         self.db_path = str(db_path)
@@ -215,14 +216,17 @@ class DurableJobStore:
         if isinstance(value, list):
             return [DurableJobStore._to_serializable(v) for v in value]
         if isinstance(value, tuple):
-            return {"__uvr_serialized_type__": "tuple", "items": [DurableJobStore._to_serializable(v) for v in value]}
+            return {DurableJobStore.SERIALIZED_TYPE_KEY: "tuple", "items": [DurableJobStore._to_serializable(v) for v in value]}
         if isinstance(value, set):
-            return {"__uvr_serialized_type__": "set", "items": [DurableJobStore._to_serializable(v) for v in value]}
+            return {DurableJobStore.SERIALIZED_TYPE_KEY: "set", "items": [DurableJobStore._to_serializable(v) for v in value]}
         if callable(value):
-            return {"__uvr_serialized_type__": "callable", "repr": repr(value)}
+            return {
+                DurableJobStore.SERIALIZED_TYPE_KEY: "callable",
+                "repr": repr(value),  # callables are not rehydrated for safety; worker uses safe defaults for callbacks
+            }
         if hasattr(value, "__dict__"):
             attrs = {k: DurableJobStore._to_serializable(v) for k, v in vars(value).items() if not callable(v)}
-            return {"__uvr_serialized_type__": "object", "attrs": attrs}
+            return {DurableJobStore.SERIALIZED_TYPE_KEY: "object", "attrs": attrs}
         return str(value)
 
     @staticmethod
@@ -230,14 +234,14 @@ class DurableJobStore:
         if isinstance(value, list):
             return [DurableJobStore._from_serialized(v) for v in value]
         if isinstance(value, dict):
-            kind = value.get("__uvr_serialized_type__")
+            kind = value.get(DurableJobStore.SERIALIZED_TYPE_KEY)
             if kind == "tuple":
                 return tuple(DurableJobStore._from_serialized(v) for v in value.get("items", []))
             if kind == "set":
                 return set(DurableJobStore._from_serialized(v) for v in value.get("items", []))
             if kind == "object":
                 attrs = {k: DurableJobStore._from_serialized(v) for k, v in value.get("attrs", {}).items()}
-                return _AttributeObject(attrs)
+                return _DeserializedObject(attrs)
             if kind == "callable":
                 return None
             return {k: DurableJobStore._from_serialized(v) for k, v in value.items()}
