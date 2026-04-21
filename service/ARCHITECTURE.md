@@ -17,9 +17,11 @@ This service now follows an async job architecture compatible with Vercel + exte
 
 - **GPU worker (`SeparationWorker`)**
   - Polls queue for leased jobs.
-  - Downloads/reads input referenced in metadata.
-  - Runs source separation.
-  - Writes artifact paths back to durable store.
+  - Streams input referenced in metadata from storage (`inputs/{job_id}/...`).
+  - Preloads common models on startup from `models/...` with checksum-aware cache reuse.
+  - Runs source separation on temp local scratch storage.
+  - Uploads outputs immediately to `outputs/{job_id}/...` and stores artifact metadata/signed URLs.
+  - Applies retention cleanup for stale artifacts and cache invalidation by version/hash.
 
 ## Production swaps
 
@@ -63,3 +65,13 @@ The image includes startup and container health checks through `service.worker_h
 - verifies ONNX Runtime providers and enforces `CUDAExecutionProvider` when `UVR_EXPECT_CUDA=1` is set (otherwise CPU fallback is accepted).
 
 Worker job-store path can be configured with `UVR_JOB_DB_PATH` (default: `data/separation_jobs.sqlite3`), which is suitable for volume mounting.
+
+## Object storage layout
+
+The API/worker contract now assumes portable object-key layout compatible with S3, Cloudflare R2, and GCS:
+
+- `inputs/{job_id}/...` for uploaded source assets
+- `models/...` for globally shared model artifacts
+- `outputs/{job_id}/...` for per-job result stems
+
+The default implementation (`LocalObjectStorage`) maps these keys onto local disk for development. In production, replace this class with cloud-provider implementations while preserving keys and metadata shape.
